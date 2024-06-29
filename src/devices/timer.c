@@ -20,21 +20,31 @@
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
 
+struct sleep_thread{
+  struct thread *thread_ref;
+  int64_t tick;
+  struct list_elem allelem;  
+  struct list_elem elem;
+};
+
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
 
 static intr_handler_func timer_interrupt;
+static struct list sleep_thread_list;
 static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
+static struct lock sleep_list_lock;
 
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
 timer_init (void) 
 {
+  list_init(&sleep_thread_list);
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
 }
@@ -84,6 +94,14 @@ timer_elapsed (int64_t then)
   return timer_ticks () - then;
 }
 
+bool order_sleep_list(struct sleep_thread *a, struct sleep_thread *b){
+  printf("olha a LISTA %d %d",a->tick,b->tick);
+  if(a->tick < b->tick){
+    return true;
+  }
+  return false;
+}
+
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
@@ -91,9 +109,18 @@ timer_sleep (int64_t ticks)
 {
   int64_t start = timer_ticks ();
 
+  struct sleep_thread e;
+
+  e.thread_ref = thread_current();
+  e.tick = ticks;
+  msg("LOG:Função pra dormir");
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+  lock_acquire(&sleep_list_lock);
+  msg("LOG: Entrou o Lock");
+  // thread_block();
+  // list_insert_ordered(&sleep_thread_list,&e.elem,order_sleep_list,NULL);
+  lock_release(&sleep_list_lock);
+
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -172,6 +199,26 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+  wake_up_threads();
+
+
+}
+
+void wake_up_threads (void) {
+
+  int64_t current_tick = ticks;
+  size_t size = list_size(&sleep_thread_list);
+  if(size> 0){
+    struct sleep_thread *e = list_front(&sleep_thread_list);
+    if (e->tick >= ticks)
+    {
+      lock_acquire(&sleep_list_lock);
+      thread_unblock(&e->thread_ref);
+      list_pop_front(&sleep_thread_list);
+      lock_release(&sleep_list_lock);
+    }
+  }
+  
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
